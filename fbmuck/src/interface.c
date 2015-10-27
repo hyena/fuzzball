@@ -22,7 +22,7 @@
 #if defined (HAVE_SYS_ERRNO_H)
 # include <sys/errno.h>
 #else
-  extern int errno;
+    extern int errno;
 #endif
 #endif
 #include <ctype.h>
@@ -71,7 +71,8 @@ typedef enum {
 	TELNET_STATE_DO,
 	TELNET_STATE_WONT,
 	TELNET_STATE_DONT,
-	TELNET_STATE_SB
+	TELNET_STATE_SB,
+	TELNET_STATE_FORWARDING
 } telnet_states_t;
 
 #define TELNET_IAC        255
@@ -92,6 +93,7 @@ typedef enum {
 #define TELNET_SE         240
 
 #define TELOPT_STARTTLS   46
+#define TELOPT_FORWARDED  113
 
 int shutdown_flag = 0;
 int restart_flag = 0;
@@ -142,6 +144,9 @@ struct descriptor_data {
 	telnet_states_t telnet_state;
 	int telnet_sb_opt;
 	int short_reads;
+	int forwarding_enabled;
+	char *forwarded_buffer;
+	int forwarded_size;
 	long last_time;
 	long connected_at;
 	long last_pinged_at;
@@ -252,7 +257,7 @@ ssize_t socket_write(struct descriptor_data *d, const void *buf, size_t count);
 #  define socket_read(d, buf, count) recv(d->descriptor, buf, count,0)
 # endif
 #endif
- 
+
 
 void resolve_hostnames(void);
 
@@ -653,21 +658,21 @@ main(int argc, char **argv)
 
 #ifdef WIN32
 	wVersionRequested = MAKEWORD( 2, 0 );
- 
+
 	err = WSAStartup( wVersionRequested, &wsaData );
 	if ( err != 0 ) {
 		perror("Unable to start socket layer");
 		return 1;
 	}
- 
+
 	if ( LOBYTE( wsaData.wVersion ) != 2 ||
 			HIBYTE( wsaData.wVersion ) != 0 ) {
 		perror("Winsock 2.0 or later is required to run this application.");
 		WSACleanup( );
-		return 1; 
+		return 1;
 	}
 
-	set_console(); 
+	set_console();
 #endif
 
 		/* go do it */
@@ -1163,7 +1168,7 @@ shovechars()
 
 #ifdef USE_SSL
 	SSL_load_error_strings ();
- 	OpenSSL_add_ssl_algorithms (); 
+	OpenSSL_add_ssl_algorithms ();
 	ssl_ctx = SSL_CTX_new (SSLv23_server_method ());
 #if defined(SSL_CTX_set_ecdh_auto)
         /* In OpenSSL >= 1.0.2, this exists; otherwise, fallback to the older
@@ -1179,7 +1184,7 @@ shovechars()
             SSL_CTX_set_options(ssl_ctx, SSL_OP_CIPHER_SERVER_PREFERENCE);
         }
 
- 
+
 	if (!SSL_CTX_use_certificate_chain_file (ssl_ctx, SSL_CERT_FILE)) {
 		log_status("Could not load certificate file %s", SSL_CERT_FILE);
 		fprintf(stderr, "Could not load certificate file %s\n", SSL_CERT_FILE);
@@ -1208,7 +1213,7 @@ shovechars()
 	if (ssl_status_ok) {
 		SSL_CTX_set_mode(ssl_ctx,SSL_MODE_AUTO_RETRY);
 	}
- 
+
 	if (ssl_status_ok) {
 		if (ipv4_enabled) {
 			for (i = 0; i < ssl_numports; i++) {
@@ -1333,7 +1338,7 @@ shovechars()
 					/* log_status("SSL : Init not finished.\n", "version"); */
 					FD_CLR(d->descriptor, &output_set);
 					FD_SET(d->descriptor, &input_set);
-				} 
+				}
 				if ( SSL_want_write(d->ssl_session) ) {
 					/* log_status("SSL : Need write.\n", "version"); */
 					FD_SET(d->descriptor, &output_set);
@@ -1935,7 +1940,7 @@ shutdownsock(struct descriptor_data *d)
 	clearstrings(d);
 	shutdown(d->descriptor, 2);
 	close(d->descriptor);
-    forget_descriptor(d);
+	forget_descriptor(d);
 	freeqs(d);
 	*d->prev = d->next;
 	if (d->next)
@@ -1944,6 +1949,8 @@ shutdownsock(struct descriptor_data *d)
 		free((void *) d->hostname);
 	if (d->username)
 		free((void *) d->username);
+	if (d->forwarded_buffer)
+		free((void *) d->forwarded_buffer);
 	mcp_frame_clear(&d->mcpframe);
 	FREE(d);
 	ndescriptors--;
@@ -2012,6 +2019,9 @@ initializesock(int s, const char *hostname, int is_ssl)
 	d->telnet_state = TELNET_STATE_NORMAL;
 	d->telnet_sb_opt = 0;
 	d->short_reads = 0;
+	d->forwarding_enabled = 0;
+	MALLOC(d->forwarded_buffer, char, 128);
+	d->forwarded_size = 0;
 	d->quota = tp_command_burst_size;
 	d->last_time = d->connected_at;
 	d->last_pinged_at = d->connected_at;
@@ -2506,14 +2516,23 @@ process_input(struct descriptor_data *d)
 						d->block_writes = 0;
 						d->short_reads = 0;
 						if (tp_starttls_allow) {
-						    d->is_starttls = 1;
-						    d->ssl_session = SSL_new(ssl_ctx);
-						    SSL_set_fd(d->ssl_session, d->descriptor);
-						    SSL_accept(d->ssl_session);
-						    log_status("STARTTLS: %i", d->descriptor);
-					    }
+							d->is_starttls = 1;
+							d->ssl_session = SSL_new(ssl_ctx);
+							SSL_set_fd(d->ssl_session, d->descriptor);
+							SSL_accept(d->ssl_session);
+							log_status("STARTTLS: %i", d->descriptor);
+						}
 					}
 #endif
+					if (d->telnet_sb_opt == TELOPT_FORWARDED) {
+						if (d->forwarded_size && d->forwarding_enabled) {
+							d->forwarded_buffer[d->forwarded_size++] = '\0';
+							free((void *) d->hostname);
+							d->hostname = alloc_string(d->forwarded_buffer);
+						}
+						d->forwarded_size = 0;
+					}
+					d->telnet_sb_opt = 0;
 					d->telnet_state = TELNET_STATE_NORMAL;
 					break;
 				case TELNET_IAC: /* IAC a second time */
@@ -2529,7 +2548,6 @@ process_input(struct descriptor_data *d)
 					break;
 			}
 		} else if (d->telnet_state == TELNET_STATE_WILL) {
-			/* We don't negotiate: send back DONT option */
 			unsigned char sendbuf[8];
 #ifdef USE_SSL
             /* If we get a STARTTLS reply, negotiate SSL startup */
@@ -2546,8 +2564,22 @@ process_input(struct descriptor_data *d)
 				d->short_reads = 1;
 			} else
 #endif
-			/* Otherwise, we don't negotiate: send back DONT option */
-			{
+			if (*q == TELOPT_FORWARDED) {
+				/* We support TELOPT_FORWARDED */
+				sendbuf[0] = TELNET_IAC;
+				sendbuf[1] = TELNET_DO;
+				sendbuf[2] = *q;
+				sendbuf[3] = '\0';
+				socket_write(d, sendbuf, 3);
+				/* If the host is in our whitelist of hosts, enable forwarding. */
+				const char **iter = FORWARDING_WHITELIST;
+				while (*iter && !d->forwarding_enabled) {
+					if (!strcmp(d->hostname, *iter)) {
+						d->forwarding_enabled = 1;
+					}
+				}
+			} else {
+				/* Otherwise, we don't negotiate: send back DONT option */
 				sendbuf[0] = TELNET_IAC;
 				sendbuf[1] = TELNET_DONT;
 				sendbuf[2] = *q;
@@ -2582,10 +2614,21 @@ process_input(struct descriptor_data *d)
 			d->telnet_enabled = 1;
 		} else if (d->telnet_state == TELNET_STATE_SB) {
 			d->telnet_sb_opt = *((unsigned char*)q);
-			/* TODO: Start remembering subnegotiation data. */
-			d->telnet_state = TELNET_STATE_NORMAL;
+			if (d->telnet_sb_opt == TELOPT_FORWARDED && d->forwarding_enabled) {
+				d->telnet_state = TELNET_STATE_FORWARDING;
+			} else {
+				/* TODO: Start remembering other subnegotiation data. */
+				d->telnet_state = TELNET_STATE_NORMAL;
+			}
+		} else if (d->telnet_state == TELNET_STATE_FORWARDING) {
+			if (*((unsigned char *)q) == TELNET_IAC) {
+				d->telnet_state = TELNET_STATE_IAC;
+			} else {
+				if (d->forwarded_size < 127)
+					d->forwarded_buffer[d->forwarded_size++] = *q;
+			}
 		} else if (*((unsigned char *)q) == TELNET_IAC) {
-			/* Got TELNET IAC, store for next byte */	
+			/* Got TELNET IAC, store for next byte */
 			d->telnet_state = TELNET_STATE_IAC;
 		} else if (p < pend) {
 			/* NOTE: This will need rethinking for unicode */
@@ -2763,7 +2806,7 @@ do_command(struct descriptor_data *d, char *command)
                             can_move(d->descriptor, d->player, buf, 2)) {
 				do_move(d->descriptor, d->player, buf, 2);
 			} else {
-				dump_users(d, command + sizeof(WHO_COMMAND) - 
+				dump_users(d, command + sizeof(WHO_COMMAND) -
                                            ((*command == OVERIDE_TOKEN)?0:1));
 			}
 		}
@@ -2976,7 +3019,7 @@ boot_player_off(dbref player)
     int* darr;
     int dcount;
     struct descriptor_data *d;
- 
+
 	darr = get_player_descrs(player, &dcount);
     for (di = 0; di < dcount; di++) {
         d = descrdata_by_descr(darr[di]);
@@ -3008,6 +3051,8 @@ close_sockets(const char *msg)
 		*d->prev = d->next;
 		if (d->next)
 			d->next->prev = d->prev;
+		if (d->forwarded_buffer)
+			FREE(d->forwarded_buffer);
 		if (d->hostname)
 			free((void *) d->hostname);
 		if (d->username)
@@ -3463,7 +3508,7 @@ int gethash_descr(int d) {
    }
    fprintf(stderr, "descr hash value missing !"); /* Should NEVER happen */
    return -1;
- 
+
 }
 
 void unsethash_descr(int d) {
@@ -3613,7 +3658,7 @@ lookup_descriptor(int c)
 #ifdef WIN32
 	if ( c < 0 ) return NULL;
 	return descr_lookup_table[gethash_descr(c)];
-#else 
+#else
 	if (c >= FD_SETSIZE || c < 0) {
 		return NULL;
 	}
@@ -3851,7 +3896,7 @@ pboot(int c)
 	}
 }
 
-int 
+int
 pdescrboot(int c)
 {
     struct descriptor_data *d;
@@ -3913,14 +3958,14 @@ pdescr(int c)
 }
 
 
-int 
+int
 pdescrcount(void)
 {
     return current_descr_count;
 }
 
 
-int 
+int
 pfirstdescr(void)
 {
     struct descriptor_data *d;
@@ -3934,7 +3979,7 @@ pfirstdescr(void)
 }
 
 
-int 
+int
 plastdescr(void)
 {
     struct descriptor_data *d;
@@ -4216,7 +4261,7 @@ log_ssl_error(const char* text, int descr, int errnum)
 
 ssize_t socket_read(struct descriptor_data *d, void *buf, size_t count) {
 	int i;
- 
+
 	if (! d->ssl_session) {
 #ifdef WIN32
 		return recv(d->descriptor, (char *) buf, count, 0);
@@ -4257,7 +4302,7 @@ ssize_t socket_read(struct descriptor_data *d, void *buf, size_t count) {
 		return i;
 	}
 }
- 
+
 ssize_t socket_write(struct descriptor_data *d, const void *buf, size_t count) {
 	int i;
 
@@ -4291,7 +4336,7 @@ ssize_t socket_write(struct descriptor_data *d, const void *buf, size_t count) {
  				errno = EWOULDBLOCK;
 #endif
 				return -1;
-			} else { 
+			} else {
 				/* log_ssl_error("write 2", d->descriptor, i); */
 #ifndef WIN32
 				errno = EBADF;
@@ -4325,7 +4370,7 @@ static int ignore_is_ignoring_sub(dbref Player, dbref Who)
 
 	/* You can't ignore yourself, or an unquelled wizard, */
 	/* and unquelled wizards can ignore no one. */
-	if ((Player == Who) || (Wizard(Player)) || (Wizard(Who))) 
+	if ((Player == Who) || (Wizard(Player)) || (Wizard(Who)))
 		return 0;
 
 	if (PLAYER_IGNORE_LAST(Player) == AMBIGUOUS)
@@ -4359,7 +4404,7 @@ static int ignore_is_ignoring_sub(dbref Player, dbref Who)
 		return 0;
 
 	PLAYER_SET_IGNORE_LAST(Player, Who);
-	
+
 	return 1;
 }
 
@@ -4466,7 +4511,7 @@ void ignore_flush_all_cache(void)
 	/* Don't touch the database if it's not been loaded yet... */
 	if (db == 0)
 		return;
-	
+
 	for(i = 0; i < db_top; i++)
 	{
 		if (Typeof(i) == TYPE_PLAYER)

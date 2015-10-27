@@ -1,7 +1,7 @@
 /*
  * config.h
  *
- * Tunable parameters -- Edit to you heart's content 
+ * Tunable parameters -- Edit to you heart's content
  *
  * Parameters that control system behavior, and tell the system
  * what resources are available (most of this is now done by
@@ -16,7 +16,7 @@
 #include "autoconf.h"
 
 /************************************************************************
-   Administrative Options 
+   Administrative Options
 
    Various things that affect how the muck operates and what privs
  are compiled in.
@@ -24,11 +24,11 @@
 
 /* Detaches the process as a daemon so that it don't cause problems
  * keeping a terminal line open and such. Logs normal output to a file
- * and writes out a fbmuck.pid file 
+ * and writes out a fbmuck.pid file
  */
 #define DETACH
 
-/* Makes God (#1) immune to @force, @newpassword, and being set !Wizard.  
+/* Makes God (#1) immune to @force, @newpassword, and being set !Wizard.
  */
 #define GOD_PRIV
 
@@ -41,7 +41,7 @@
 
 /* To make the server save using fast delta dumps that only write out the
  * changed objects, except when @dump or @shutdown are used, or when too
- * many deltas have already been saved to disk, #define this. 
+ * many deltas have already been saved to disk, #define this.
  */
 #define DELTADUMPS
 
@@ -94,10 +94,17 @@
  */
 #define SIGEMERG
 
+/*
+ * This defines a whitelisted set of hostnames that permit ip hostname
+ * forwarding through telnet. The array must end with null.
+ * By default, only the local machine is whitelisted.
+ */
+static const char *FORWARDING_WHITELIST[] = { "127.0.0.1", "::1", "localhost", 0 };
+
 /************************************************************************
    Game Options
 
-   These are the ones players will notice. 
+   These are the ones players will notice.
  ************************************************************************/
 
 /* Make the `examine' command display full names for types and flags */
@@ -107,8 +114,8 @@
 #define PLAYER_NAME_LIMIT 16
 
 /************************************************************************
-   Various Messages 
- 
+   Various Messages
+
    Printed from the server at times, esp. during login.
  ************************************************************************/
 
@@ -127,7 +134,7 @@
 
 /************************************************************************
    File locations
- 
+
    Where the system looks for its datafiles.
  ************************************************************************/
 
@@ -178,7 +185,7 @@
 #endif							/* DETACH */
 
 /************************************************************************
-  System Dependency Defines. 
+  System Dependency Defines.
 
   You probably will not have to monkey with this unless the muck fails
  to compile for some reason.
@@ -220,7 +227,7 @@
 #endif
 
 /*
- * Very general defines 
+ * Very general defines
  */
 #define TRUE  1
 #define FALSE 0
